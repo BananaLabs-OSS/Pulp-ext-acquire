@@ -13,7 +13,7 @@ import (
 // for one that isn't.
 func TestResolveInstalled(t *testing.T) {
 	// `go` is on PATH wherever the tests run.
-	got := resolveInstalled(acquireReq{Name: "go"})
+	got := resolveInstalled(Request{Name: "go"})
 	if !got.Ok || got.Status != "resolved" {
 		t.Fatalf("installed go: got %+v", got)
 	}
@@ -21,7 +21,7 @@ func TestResolveInstalled(t *testing.T) {
 		t.Fatalf("installed path not absolute: %q", got.Path)
 	}
 
-	miss := resolveInstalled(acquireReq{Name: "definitely-not-a-real-binary-xyzzy"})
+	miss := resolveInstalled(Request{Name: "definitely-not-a-real-binary-xyzzy"})
 	if miss.Ok || miss.Status != "notfound" {
 		t.Fatalf("missing binary should be notfound, got %+v", miss)
 	}
@@ -34,7 +34,7 @@ func TestResolveInstalledExpectPath(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got := resolveInstalled(acquireReq{Name: "definitely-not-on-path-xyzzy", ExpectPath: bin})
+	got := resolveInstalled(Request{Name: "definitely-not-on-path-xyzzy", ExpectPath: bin})
 	if !got.Ok || got.Status != "resolved" || got.Path != bin {
 		t.Fatalf("expect_path fallback: got %+v want path %q", got, bin)
 	}
@@ -46,22 +46,22 @@ func TestResolveManual(t *testing.T) {
 	if err != nil {
 		t.Skip("no go on PATH")
 	}
-	ok := resolveManual(acquireReq{Path: gopath})
+	ok := resolveManual(Request{Path: gopath})
 	if !ok.Ok || ok.Status != "resolved" {
 		t.Fatalf("manual real path: got %+v", ok)
 	}
 
-	bad := resolveManual(acquireReq{Path: filepath.Join(t.TempDir(), "nope")})
+	bad := resolveManual(Request{Path: filepath.Join(t.TempDir(), "nope")})
 	if bad.Ok || bad.Status != "notfound" {
 		t.Fatalf("manual bogus path: got %+v", bad)
 	}
 
-	dir := resolveManual(acquireReq{Path: t.TempDir()})
+	dir := resolveManual(Request{Path: t.TempDir()})
 	if dir.Ok {
 		t.Fatalf("manual dir should fail, got %+v", dir)
 	}
 
-	empty := resolveManual(acquireReq{Path: ""})
+	empty := resolveManual(Request{Path: ""})
 	if empty.Ok || empty.Status != "failed" {
 		t.Fatalf("manual empty path: got %+v", empty)
 	}
@@ -70,12 +70,12 @@ func TestResolveManual(t *testing.T) {
 // official with no install_cmd fails fast; with the binary already present it
 // short-circuits to resolved without running anything.
 func TestResolveOfficial(t *testing.T) {
-	noCmd := resolveOfficial(acquireReq{Name: "go"})
+	noCmd := resolveOfficial(Request{Name: "go"})
 	if noCmd.Status != "failed" {
 		t.Fatalf("official without install_cmd should fail, got %+v", noCmd)
 	}
 	// `go` is already installed → short-circuit, installer never runs.
-	pre := resolveOfficial(acquireReq{Name: "go", InstallCmd: "exit 1"})
+	pre := resolveOfficial(Request{Name: "go", InstallCmd: "exit 1"})
 	if !pre.Ok || pre.Status != "resolved" {
 		t.Fatalf("official with pre-installed binary should short-circuit, got %+v", pre)
 	}

@@ -54,6 +54,52 @@ const installTimeout = 10 * time.Minute
 
 var logger = slog.Default()
 
+// SetLogger lets a native caller (a host that uses Resolve directly, outside the
+// wasm capability) route this package's logs into its own logger.
+func SetLogger(l *slog.Logger) {
+	if l != nil {
+		logger = l
+	}
+}
+
+// Request is the input to Resolve. It mirrors the capability's wire request, so
+// the same logic serves both the wasm capability and native callers.
+type Request struct {
+	Name       string // binary to resolve, e.g. "claude"
+	Source     string // "installed" | "official" | "manual"
+	InstallCmd string // source=official: shell command to run (vendor's official installer)
+	Path       string // source=manual: explicit binary path
+	ExpectPath string // optional: where the binary lands after install if not on PATH
+}
+
+// Result is the resolved outcome. Path is absolute when Ok.
+type Result struct {
+	Ok      bool
+	Status  string // "resolved" | "installed" | "notfound" | "unsupported" | "failed"
+	Path    string
+	Message string
+}
+
+// Resolve runs an acquisition NATIVELY (no wasm) and is the shared core of the
+// tool.acquire capability. A host that must run a slow installer off the cell's
+// single thread (e.g. a detached orchestrator) calls this directly instead of
+// the wasm import. It only RESOLVES — placement is the caller's job.
+func Resolve(req Request) Result {
+	if req.Name == "" && req.Path == "" {
+		return Result{Status: "failed", Message: "acquire: name or path required"}
+	}
+	switch req.Source {
+	case "manual":
+		return resolveManual(req)
+	case "official":
+		return resolveOfficial(req)
+	case "installed", "":
+		return resolveInstalled(req)
+	default:
+		return Result{Status: "unsupported", Message: "acquire: unknown source " + req.Source}
+	}
+}
+
 func init() {
 	ext.Register(ext.Capability{
 		Name: "tool.acquire",
@@ -96,83 +142,76 @@ type acquireResp struct {
 }
 
 func toolAcquire(ctx context.Context, m api.Module, reqPtr, reqLen, respPtrOut, respLenOut uint32) uint32 {
-	var req acquireReq
+	var wire acquireReq
 	if reqLen > 0 {
 		data, ok := m.Memory().Read(reqPtr, reqLen)
 		if !ok {
 			return codeMemRead
 		}
-		if err := msgpack.Unmarshal(data, &req); err != nil {
+		if err := msgpack.Unmarshal(data, &wire); err != nil {
 			return codeDecode
 		}
 	}
-	if req.Name == "" && req.Path == "" {
-		return reply(ctx, m, respPtrOut, respLenOut, acquireResp{Status: "failed", Message: "acquire: name or path required"})
-	}
-
-	switch req.Source {
-	case "manual":
-		return reply(ctx, m, respPtrOut, respLenOut, resolveManual(req))
-	case "official":
-		return reply(ctx, m, respPtrOut, respLenOut, resolveOfficial(req))
-	case "installed", "":
-		return reply(ctx, m, respPtrOut, respLenOut, resolveInstalled(req))
-	default:
-		return reply(ctx, m, respPtrOut, respLenOut, acquireResp{Status: "unsupported", Message: "acquire: unknown source " + req.Source})
-	}
+	res := Resolve(Request{
+		Name: wire.Name, Source: wire.Source, InstallCmd: wire.InstallCmd,
+		Path: wire.Path, ExpectPath: wire.ExpectPath,
+	})
+	return reply(ctx, m, respPtrOut, respLenOut, acquireResp{
+		Ok: res.Ok, Status: res.Status, Path: res.Path, Message: res.Message,
+	})
 }
 
 // resolveInstalled returns the binary already on PATH (or at an expect_path).
-func resolveInstalled(req acquireReq) acquireResp {
+func resolveInstalled(req Request) Result {
 	if p := lookup(req.Name); p != "" {
-		return acquireResp{Ok: true, Status: "resolved", Path: p, Message: "found on PATH"}
+		return Result{Ok: true, Status: "resolved", Path: p, Message: "found on PATH"}
 	}
 	if p := expectHit(req.ExpectPath); p != "" {
-		return acquireResp{Ok: true, Status: "resolved", Path: p, Message: "found at expected path"}
+		return Result{Ok: true, Status: "resolved", Path: p, Message: "found at expected path"}
 	}
-	return acquireResp{Status: "notfound", Message: req.Name + " not on PATH"}
+	return Result{Status: "notfound", Message: req.Name + " not on PATH"}
 }
 
 // resolveManual verifies a caller-supplied binary path.
-func resolveManual(req acquireReq) acquireResp {
+func resolveManual(req Request) Result {
 	p := expandHome(req.Path)
 	if p == "" {
-		return acquireResp{Status: "failed", Message: "manual: path required"}
+		return Result{Status: "failed", Message: "manual: path required"}
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
-		return acquireResp{Status: "failed", Message: "manual: " + err.Error()}
+		return Result{Status: "failed", Message: "manual: " + err.Error()}
 	}
 	fi, err := os.Stat(abs)
 	if err != nil || fi.IsDir() {
-		return acquireResp{Status: "notfound", Message: "manual: no file at " + abs}
+		return Result{Status: "notfound", Message: "manual: no file at " + abs}
 	}
-	return acquireResp{Ok: true, Status: "resolved", Path: abs, Message: "manual path verified"}
+	return Result{Ok: true, Status: "resolved", Path: abs, Message: "manual path verified"}
 }
 
 // resolveOfficial runs the vendor's official install command verbatim, then
 // re-resolves the binary (PATH, then expect_path). Running the vendor command
 // as-is keeps the integrity story theirs, not ours; we record what ran.
-func resolveOfficial(req acquireReq) acquireResp {
+func resolveOfficial(req Request) Result {
 	if req.InstallCmd == "" {
-		return acquireResp{Status: "failed", Message: "official: install_cmd required"}
+		return Result{Status: "failed", Message: "official: install_cmd required"}
 	}
 	// Already there? Skip the install (idempotent).
 	if p := lookup(req.Name); p != "" {
-		return acquireResp{Ok: true, Status: "resolved", Path: p, Message: "already installed"}
+		return Result{Ok: true, Status: "resolved", Path: p, Message: "already installed"}
 	}
 	logger.Info("tool.acquire running official installer", "name", req.Name, "cmd", req.InstallCmd)
 	if out, err := runShell(req.InstallCmd); err != nil {
 		logger.Error("tool.acquire installer failed", "name", req.Name, "err", err, "out", tailStr(out, 500))
-		return acquireResp{Status: "failed", Message: "installer failed: " + err.Error() + "\n" + tailStr(out, 500)}
+		return Result{Status: "failed", Message: "installer failed: " + err.Error() + "\n" + tailStr(out, 500)}
 	}
 	if p := lookup(req.Name); p != "" {
-		return acquireResp{Ok: true, Status: "installed", Path: p, Message: "installed (on PATH)"}
+		return Result{Ok: true, Status: "installed", Path: p, Message: "installed (on PATH)"}
 	}
 	if p := expectHit(req.ExpectPath); p != "" {
-		return acquireResp{Ok: true, Status: "installed", Path: p, Message: "installed (at expected path)"}
+		return Result{Ok: true, Status: "installed", Path: p, Message: "installed (at expected path)"}
 	}
-	return acquireResp{Status: "notfound", Message: "installer ran but " + req.Name + " not found on PATH or expect_path"}
+	return Result{Status: "notfound", Message: "installer ran but " + req.Name + " not found on PATH or expect_path"}
 }
 
 // runShell runs cmd through the OS's default shell, returning combined output.
