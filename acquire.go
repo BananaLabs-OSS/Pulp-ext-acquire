@@ -65,11 +65,11 @@ func SetLogger(l *slog.Logger) {
 // Request is the input to Resolve. It mirrors the capability's wire request, so
 // the same logic serves both the wasm capability and native callers.
 type Request struct {
-	Name       string // binary to resolve, e.g. "claude"
-	Source     string // "installed" | "official" | "manual"
-	InstallCmd string // source=official: shell command to run (vendor's official installer)
-	Path       string // source=manual: explicit binary path
-	ExpectPath string // optional: where the binary lands after install if not on PATH
+	Name       string `msgpack:"name"`        // binary to resolve, e.g. "claude"
+	Source     string `msgpack:"source"`      // "installed" | "official" | "manual"
+	InstallCmd string `msgpack:"install_cmd"` // source=official: shell command to run (vendor's official installer)
+	Path       string `msgpack:"path"`        // source=manual: explicit binary path
+	ExpectPath string `msgpack:"expect_path"` // optional: where the binary lands after install if not on PATH
 }
 
 // Result is the resolved outcome. Path is absolute when Ok.
@@ -126,14 +126,6 @@ func bindStub(b wazero.HostModuleBuilder, _ ext.Cell) error {
 	return nil
 }
 
-type acquireReq struct {
-	Name       string `msgpack:"name"`        // binary to resolve, e.g. "claude"
-	Source     string `msgpack:"source"`      // "installed" | "official" | "manual"
-	InstallCmd string `msgpack:"install_cmd"` // source=official: shell command to run (vendor's official installer)
-	Path       string `msgpack:"path"`        // source=manual: explicit binary path
-	ExpectPath string `msgpack:"expect_path"` // optional: where the binary lands after install if not on PATH (e.g. "~/.local/bin/claude")
-}
-
 type acquireResp struct {
 	Ok      bool   `msgpack:"ok"`
 	Status  string `msgpack:"status"` // "resolved" | "installed" | "notfound" | "unsupported" | "failed"
@@ -142,7 +134,7 @@ type acquireResp struct {
 }
 
 func toolAcquire(ctx context.Context, m api.Module, reqPtr, reqLen, respPtrOut, respLenOut uint32) uint32 {
-	var wire acquireReq
+	var wire Request
 	if reqLen > 0 {
 		data, ok := m.Memory().Read(reqPtr, reqLen)
 		if !ok {
@@ -152,10 +144,7 @@ func toolAcquire(ctx context.Context, m api.Module, reqPtr, reqLen, respPtrOut, 
 			return codeDecode
 		}
 	}
-	res := Resolve(Request{
-		Name: wire.Name, Source: wire.Source, InstallCmd: wire.InstallCmd,
-		Path: wire.Path, ExpectPath: wire.ExpectPath,
-	})
+	res := Resolve(wire)
 	return reply(ctx, m, respPtrOut, respLenOut, acquireResp{
 		Ok: res.Ok, Status: res.Status, Path: res.Path, Message: res.Message,
 	})
