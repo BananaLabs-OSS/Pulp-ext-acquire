@@ -181,6 +181,19 @@ func resolveManual(req Request) Result {
 // resolveOfficial runs the vendor's official install command verbatim, then
 // re-resolves the binary (PATH, then expect_path). Running the vendor command
 // as-is keeps the integrity story theirs, not ours; we record what ran.
+//
+// SECURITY: The request's InstallCmd is executed as a shell command without
+// validation or sanitization. On Unix, it runs via `sh -c`; on Windows, via
+// `powershell.exe -Command`. This design provides full RCE if a cell is untrusted.
+//
+// TRUSTED-CELL MODEL ONLY: This is safe ONLY under the trusted-cell model where
+// all cells are authored by the operator and run with the operator's consent.
+// The assumption is that cells have the same security boundary as the host.
+//
+// BEFORE THIRD-PARTY CELLS: Before exposing this capability to any third-party
+// or untrusted cell, a Setup-time allowlist mechanism MUST be implemented to
+// restrict which install commands are permitted. The current implementation
+// offers no restrictions and assumes all cell inputs are trusted.
 func resolveOfficial(req Request) Result {
 	if req.InstallCmd == "" {
 		return Result{Status: "failed", Message: "official: install_cmd required"}
